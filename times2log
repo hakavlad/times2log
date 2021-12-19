@@ -96,7 +96,7 @@ def times():
         exit(1)
 
     t = monotonic()
-    s = content.decode().rpartition(')')[2].split(' ')
+    s = content.decode('utf-8', 'ignore').rpartition(')')[2].split(' ')
 
     utime = int(s[12])
     stime = int(s[13])
