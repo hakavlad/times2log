@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+from argparse import ArgumentParser
+from ctypes import CDLL
+from os import sysconf, sysconf_names
+from signal import SIGHUP, SIGINT, SIGQUIT, SIGTERM, signal
+from sys import exit
+from time import monotonic, sleep
+
+
+def log(msg):
+    """
+    """
+    print(msg)
+    if separate_log:
+        logging.info(msg)
+
+
+def mlockall():
+    """
+    """
+    MCL_CURRENT = 1
+    MCL_FUTURE = 2
+    MCL_ONFAULT = 4
+
+    libc = CDLL(None, use_errno=True)
+    result = libc.mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)
+
+    if result != 0:
+        result = libc.mlockall(MCL_CURRENT | MCL_FUTURE)
+        if result != 0:
+            log('WARNING: cannot lock process memory: [Errno {}]'.format(
+                result))
+        else:
+            log('Process memory locked with MCL_CURRENT | MCL_FUTURE')
+    else:
+        log('Process memory locked with MCL_CURRENT | MCL_FUTURE | MCL_'
+            'ONFAULT')
+
+
+def signal_handler(signum, frame):
+    """
+    """
+    def signal_handler_inner(signum, frame):
+        pass
+
+    for i in sig_list:
+        signal(i, signal_handler_inner)
+
+    utime, stime, t = times()
+
+    d_utime = utime - utime_0
+    d_utime_s = d_utime / SC_CLK_TCK
+
+    d_stime = stime - stime_0
+    d_stime_s = d_stime / SC_CLK_TCK
+
+    d_sum = d_utime + d_stime
+    d_sum_s = d_utime_s + d_stime_s
+
+    d_t = t - t_0
+
+    log('--')
+    log('Times for the last {}s:'.format(round(d_t, 1)))
+
+    log('  user:   {} ticks ({}s), avg: {}%'.format(
+        d_utime,
+        round(d_utime_s, 1),
+        round(d_utime_s / d_t * 100, 1)
+    ))
+
+    log('  system: {} ticks ({}s), avg: {}%'.format(
+        d_stime,
+        round(d_stime_s, 1),
+        round(d_stime_s / d_t * 100, 1)
+    ))
+
+    log('  total:  {} ticks ({}s), avg: {}%'.format(
+        d_sum,
+        round(d_sum_s, 1),
+        round(d_sum_s / d_t * 100, 1)
+    ))
+
+    exit()
+
+
+def times():
+    """
+    """
+    fd[None].seek(0)
+
+    try:
+        content = fd[None].read()
+    except ProcessLookupError as e:
+        log(e)
+        exit(1)
+
+    t = monotonic()
+    s = content.decode().rpartition(')')[2].split(' ')
+
+    utime = int(s[12])
+    stime = int(s[13])
+
+    return utime, stime, t
+
+
+sig_list = [SIGTERM, SIGINT, SIGQUIT, SIGHUP]
+
+for i in sig_list:
+    signal(i, signal_handler)
+
+
+parser = ArgumentParser()
+
+parser.add_argument(
+    '-p',
+    '--pid',
+    help='PID of the process',
+    default=1,
+    type=int
+)
+
+parser.add_argument(
+    '-i',
+    '--interval',
+    help='output interval in seconds',
+    default=2,
+    type=float
+)
+
+parser.add_argument(
+    '-l',
+    '--log',
+    help='path to the log file',
+    default=None,
+    type=str
+)
+
+
+args = parser.parse_args()
+pid = args.pid
+interval = args.interval
+log_file = args.log
+
+
+if log_file is None:
+    separate_log = False
+else:
+    separate_log = True
+    import logging
+
+if log_file is not None:
+    logstring = 'log file: {}, '.format(log_file)
+else:
+    logstring = 'log file is not set, '
+
+
+if pid < 1:
+    log('invalid PID value')
+    exit(1)
+
+
+if interval < 0.01:
+    log('invalid interval value')
+    exit(1)
+
+
+if separate_log:
+    try:
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format="%(asctime)s: %(message)s")
+    except Exception as e:
+        print(e)
+        exit(1)
+
+
+fd = dict()
+
+try:
+    fd[None] = open('/proc/{}/stat'.format(pid), 'rb', buffering=0)
+    name = fd[None].read().decode('utf-8', 'ignore')[:-1].partition(
+        '(')[2].rpartition(')')[0]
+except (FileNotFoundError, ProcessLookupError, PermissionError) as e:
+    log(e)
+    exit(1)
+
+
+mlockall()
+
+
+SC_CLK_TCK = sysconf(sysconf_names['SC_CLK_TCK'])
+
+log('PID: {}, Name: {}, interval: {}s, SC_CLK_TCK: {}'.format(
+    pid, name, round(interval, 1), SC_CLK_TCK))
+
+
+utime_0, stime_0, t_0 = times()
+utime_old, stime_old, t_old = utime_0, stime_0, t_0
+
+log('============================================================')
+log('       user    |      system    |        total    | interval')
+log('-------------- | -------------- | --------------- | --------')
+
+sleep(interval)
+
+while True:
+    utime, stime, t = times()
+
+    d_utime = utime - utime_old
+    d_stime = stime - stime_old
+    d_t = t - t_old
+    d_sum = d_utime + d_stime
+
+    utime_old = utime
+    stime_old = stime
+    t_old = t
+
+    log('{:>4} t, {:>5}% | {:>4} t, {:>5}% | {:>5} t, {:>5}% | {}s'.format(
+        d_utime,
+        round(d_utime / d_t / SC_CLK_TCK * 100, 1),
+        d_stime,
+        round(d_stime / d_t / SC_CLK_TCK * 100, 1),
+        d_sum,
+        round(d_sum / d_t / SC_CLK_TCK * 100, 1),
+        round(d_t, 2)
+    ))
+
+    sleep(interval)
